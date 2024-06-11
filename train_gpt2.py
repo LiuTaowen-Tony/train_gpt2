@@ -10,6 +10,14 @@ from torch.nn.utils import clip_grad_norm_
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from torch.nn.utils.rnn import pad_sequence
+from torch import nn
+
+import sys
+sys.path.append('../..')
+import block_linear
+from microxcaling.mx import finalize_mx_specs
+from microxcaling import mx
+
 
 # Argument parser
 def parse_args():
@@ -20,12 +28,17 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate for the optimizer')
     parser.add_argument('--precision', type=str, default='bf16', help='Precision for training (16 or bf16)')
     parser.add_argument('--warmup_steps', type=int, default=5000, help='Number of warmup steps')
-    parser.add_argument('--matmul_precision', type=str, default='medium', help="Matrix multiplication precision ('medium' or 'high')")
+    # parser.add_argument('--matmul_precision', type=str, default='medium', help="Matrix multiplication precision ('medium' or 'high')")
     parser.add_argument('--token_limit', type=int, default=500_000_000, help="Maximum number of training tokens")
     parser.add_argument('--datasets', nargs='+', default=['wikitext', 'cnn_dailymail'], help="List of datasets to use")
     parser.add_argument('--sampling_probs', nargs='+', type=float, default=None, help="Sampling probabilities for the datasets")
     parser.add_argument('--gradient_clip_val', type=float, default=1.0, help="Value for gradient clipping")
+    parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
+    # parser.add_argument('--use_block_float', action='store_true', help='Use block floating point for linear layers')
     return parser.parse_args()
+
+random.seed(42)
+torch.manual_seed(42)
 
 # Load tokenizer
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
@@ -33,6 +46,19 @@ tokenizer.pad_token = tokenizer.eos_token
 
 # Dataset registry
 DATASET_REGISTRY = {}
+
+def replace_mx_linear(model, mx_specs):
+    def recursive_replace_module(module):
+        for name, child in module.named_children():
+            if isinstance(child, nn.Linear):
+                print("replacing", name, "with microxcaling")
+                weight = child.weight
+                setattr(module, name, mx.Linear(child.in_features, child.out_features, child.bias, mx_specs))
+                getattr(module, name).weight = weight
+            else:
+                recursive_replace_module(child)
+    recursive_replace_module(model)
+    return model
 
 def register_dataset(name):
     def decorator(cls):
@@ -121,13 +147,37 @@ class GPT2FineTuner(pl.LightningModule):
         self.model = model
         self.args = args
         self.total_tokens = total_tokens
+        if args.precision == "block_int8":
+            self.model = self.model.to(torch.bfloat16)
+            block_linear.replace_linear_with_blockwise_int8(self.model)
+        elif args.precision == "bf16":
+            self.model = self.model.to(torch.bfloat16)
+        elif args.precision == "mx_block_int8":
+            self.model = self.model.to(torch.bfloat16)
+            mx_specs = {
+                'scale_bits': 7,
+                'w_elem_format': 'int8',
+                'a_elem_format': 'int8',
+                'mx_block_size': 128,
+                'block_size': 128,
+                'custom_cuda': True,
+                'bfloat': 16,
+                # For quantization-aware finetuning, do backward pass in FP32
+                'quantize_backprop': True,
+            }
+            mx_specs = finalize_mx_specs(mx_specs)
+            print(mx_specs)
+            self.model = replace_mx_linear(self.model, mx_specs)
+        else:
+            raise ValueError("Precision must be 'block_int8' or 'bf16'")
+
 
     def forward(self, input_ids, labels=None):
         return self.model(input_ids, labels=labels)
 
     def training_step(self, batch, batch_idx):
         outputs = self(batch['input_ids'], labels=batch['labels'])
-        loss = outputs.loss
+        loss = outputs.loss.to(torch.bfloat16)
         total_norm = clip_grad_norm_(self.model.parameters(), self.args.gradient_clip_val)
         self.log('grad_norm', total_norm, on_step=True, prog_bar=True, logger=True)
         self.log('train_loss', loss, on_step=True, prog_bar=True, logger=True)
@@ -153,7 +203,7 @@ class GPT2FineTuner(pl.LightningModule):
 def main():
     args = parse_args()
 
-    torch.set_float32_matmul_precision(args.matmul_precision)
+    # torch.set_float32_matmul_precision(args.matmul_precision)
 
     datasets = [DATASET_REGISTRY[dataset_name](max_length=128) for dataset_name in args.datasets]
 
@@ -178,11 +228,12 @@ def main():
     model = GPT2FineTuner(model, args, args.token_limit)
 
     wandb_logger = WandbLogger(project='gpt2-training')
+    wandb_logger.log_hyperparams(args)
 
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         accumulate_grad_batches=args.accumulate_grad_batches,
-        precision=args.precision,
+        # precision=args.precision,
         logger=wandb_logger,
         limit_train_batches=args.token_limit // (args.batch_size * 128)
     )
