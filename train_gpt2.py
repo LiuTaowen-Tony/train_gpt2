@@ -161,7 +161,7 @@ class GPT2FineTuner(pl.LightningModule):
         elif args.precision == "mx_block_int8":
             # self.model = self.model.to(torch.bfloat16)
             mx_specs = {
-                'scale_bits': 7,
+                'scale_bits': 9,
                 'w_elem_format': 'int8',
                 'a_elem_format': 'int8',
                 'mx_block_size': 128,
