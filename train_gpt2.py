@@ -15,6 +15,7 @@ from torch import nn
 import sys
 sys.path.append('../..')
 import block_linear
+import triton_functions
 from microxcaling.mx import finalize_mx_specs
 from microxcaling import mx
 
@@ -34,6 +35,8 @@ def parse_args():
     parser.add_argument('--sampling_probs', nargs='+', type=float, default=None, help="Sampling probabilities for the datasets")
     parser.add_argument('--gradient_clip_val', type=float, default=1.0, help="Value for gradient clipping")
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument('--weight_type', default="fp32")
+    parser.add_argument('--activation_grad_type', default="fp32")
     # parser.add_argument('--use_block_float', action='store_true', help='Use block floating point for linear layers')
     return parser.parse_args()
 
@@ -147,13 +150,16 @@ class GPT2FineTuner(pl.LightningModule):
         self.model = model
         self.args = args
         self.total_tokens = total_tokens
-        if args.precision == "block_int8":
+        if args.weight_type == "bf16":
             self.model = self.model.to(torch.bfloat16)
+        if args.activation_grad_type == "bf16":
+            triton_functions.INPUT_OUTPUT_TORCH_TYPE = torch.bfloat16
+        if args.precision == "block_int8":
             block_linear.replace_linear_with_blockwise_int8(self.model)
         elif args.precision == "bf16":
             self.model = self.model.to(torch.bfloat16)
         elif args.precision == "mx_block_int8":
-            self.model = self.model.to(torch.bfloat16)
+            # self.model = self.model.to(torch.bfloat16)
             mx_specs = {
                 'scale_bits': 7,
                 'w_elem_format': 'int8',
