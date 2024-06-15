@@ -11,6 +11,7 @@ import wandb
 from pytorch_lightning.loggers import WandbLogger
 from torch.nn.utils.rnn import pad_sequence
 from torch import nn
+import math
 
 import sys
 sys.path.append('../..')
@@ -37,6 +38,7 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument('--weight_type', default="fp32")
     parser.add_argument('--activation_grad_type', default="fp32")
+    parser.add_argument('--size', type=float, default=1.0)
     # parser.add_argument('--use_block_float', action='store_true', help='Use block floating point for linear layers')
     return parser.parse_args()
 
@@ -156,8 +158,8 @@ class GPT2FineTuner(pl.LightningModule):
             triton_functions.INPUT_OUTPUT_TORCH_TYPE = torch.bfloat16
         if args.precision == "block_int8":
             block_linear.replace_linear_with_blockwise_int8(self.model)
-        elif args.precision == "bf16":
-            self.model = self.model.to(torch.bfloat16)
+        # elif args.precision == "bf16":
+        #     self.model = self.model.to(torch.bfloat16)
         elif args.precision == "mx_block_int8":
             # self.model = self.model.to(torch.bfloat16)
             mx_specs = {
@@ -174,8 +176,8 @@ class GPT2FineTuner(pl.LightningModule):
             mx_specs = finalize_mx_specs(mx_specs)
             print(mx_specs)
             self.model = replace_mx_linear(self.model, mx_specs)
-        else:
-            raise ValueError("Precision must be 'block_int8' or 'bf16'")
+        # else:
+        #     raise ValueError("Precision must be 'block_int8' or 'bf16'")
 
 
     def forward(self, input_ids, labels=None):
@@ -222,8 +224,8 @@ def main():
         vocab_size=tokenizer.vocab_size,
         n_positions=128,
         n_ctx=128,
-        n_embd=256,
-        n_layer=6,
+        n_embd=int(256 * math.sqrt(args.size)) // 4 * 4,
+        n_layer=int(6 * math.sqrt(args.size)),
         n_head=4,
     )
 
@@ -239,7 +241,7 @@ def main():
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         accumulate_grad_batches=args.accumulate_grad_batches,
-        # precision=args.precision,
+        precision="bf16" if args.precision == "bf16" else None,
         logger=wandb_logger,
         limit_train_batches=args.token_limit // (args.batch_size * 128)
     )
