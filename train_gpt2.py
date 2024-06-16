@@ -1,6 +1,7 @@
 import random
 import argparse
 import pytorch_lightning as pl
+import torch.distributed
 from transformers import GPT2Tokenizer, GPT2Config, GPT2LMHeadModel, get_cosine_schedule_with_warmup
 from datasets import load_dataset
 from torch.utils.data import DataLoader, IterableDataset
@@ -12,6 +13,8 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.nn.utils.rnn import pad_sequence
 from torch import nn
 import math
+from pytorch_lightning.strategies import FSDPStrategy
+
 
 import sys
 sys.path.append('../..')
@@ -24,7 +27,7 @@ from microxcaling import mx
 # Argument parser
 def parse_args():
     parser = argparse.ArgumentParser(description="Train GPT-2 model from scratch.")
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
+    parser.add_argument('--total_batch_size', type=int, default=128, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
     parser.add_argument('--accumulate_grad_batches', type=int, default=1, help='Gradient accumulation steps')
     parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate for the optimizer')
@@ -40,14 +43,14 @@ def parse_args():
     parser.add_argument('--activation_grad_type', default="fp32")
     parser.add_argument('--size', type=float, default=1.0)
     # parser.add_argument('--use_block_float', action='store_true', help='Use block floating point for linear layers')
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.batch_size = args.total_batch_size // args.accumulate_grad_batches // torch.cuda.device_count()
+    return args
 
 random.seed(42)
 torch.manual_seed(42)
 
-# Load tokenizer
-tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-tokenizer.pad_token = tokenizer.eos_token
+
 
 # Dataset registry
 DATASET_REGISTRY = {}
@@ -73,7 +76,7 @@ def register_dataset(name):
 
 # Abstract Dataset class
 class BaseDataset(IterableDataset):
-    def __init__(self, dataset_name, config_name, max_length=128, streaming=False, **kwargs):
+    def __init__(self, dataset_name, config_name, tokenizer, max_length=128, streaming=False, **kwargs):
         self.dataset = load_dataset(dataset_name, config_name, split='train', streaming=streaming, **kwargs)
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -141,7 +144,7 @@ class DatasetShuffler(IterableDataset):
             self.current_token_count += len(sample['input_ids'])
             yield sample
 
-def collate_fn(batch):
+def collate_fn(batch, tokenizer):
     input_ids = pad_sequence([item['input_ids'] for item in batch], batch_first=True, padding_value=tokenizer.pad_token_id)
     labels = pad_sequence([item['labels'] for item in batch], batch_first=True, padding_value=tokenizer.pad_token_id)
     return {'input_ids': input_ids, 'labels': labels}
@@ -193,7 +196,7 @@ class GPT2FineTuner(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = AdamW(self.parameters(), lr=self.args.learning_rate)
-        total_training_steps = self.total_tokens // self.args.batch_size
+        total_training_steps = self.total_tokens // self.args.total_batch_size 
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=self.args.warmup_steps,
@@ -213,12 +216,15 @@ def main():
 
     # torch.set_float32_matmul_precision(args.matmul_precision)
 
-    datasets = [DATASET_REGISTRY[dataset_name](max_length=128) for dataset_name in args.datasets]
+    # Load tokenizer
+    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    tokenizer.pad_token = tokenizer.eos_token
+    datasets = [DATASET_REGISTRY[dataset_name](tokenizer=tokenizer,max_length=128) for dataset_name in args.datasets]
 
     token_limit = args.token_limit
     sampling_probs = args.sampling_probs
     combined_dataset = DatasetShuffler(datasets, token_limit=token_limit, sampling_probs=sampling_probs)
-    train_dataloader = DataLoader(combined_dataset, batch_size=args.batch_size, num_workers=4, pin_memory=True, collate_fn=collate_fn)
+    train_dataloader = DataLoader(combined_dataset, batch_size=args.batch_size, num_workers=4, pin_memory=True, collate_fn=lambda b: collate_fn(b, tokenizer))
 
     config = GPT2Config(
         vocab_size=tokenizer.vocab_size,
@@ -243,7 +249,9 @@ def main():
         accumulate_grad_batches=args.accumulate_grad_batches,
         precision="bf16" if args.precision == "bf16" else None,
         logger=wandb_logger,
-        limit_train_batches=args.token_limit // (args.batch_size * 128)
+        limit_train_batches=args.token_limit // (args.batch_size * 128 * args.accumulate_grad_batches),
+    #     strategy=FSDPStrategy(
+    # sharding_strategy="FULL_SHARD")
     )
 
     trainer.fit(model, train_dataloader)

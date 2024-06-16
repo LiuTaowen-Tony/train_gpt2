@@ -47,3 +47,5 @@ lightning_logs/
 gpt2-training/
 small-gpt2-wikitext-cnn/
 
+results/
+small-gpt2-c4/

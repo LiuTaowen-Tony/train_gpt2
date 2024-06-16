@@ -1,0 +1,4 @@
+# torchrun --nproc_per_node 4 train_gpt2_hf.py --size 10 --precision bf16
+# torchrun --nproc_per_node 4 train_gpt2_hf.py --size 10 --precision block_int8 --quantise_weight
+torchrun --nproc_per_node 4 train_gpt2_hf.py --size 30 --precision block_int8 --quantise_weight
+torchrun --nproc_per_node 4 train_gpt2_hf.py --size 30 --precision bf16
