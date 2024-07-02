@@ -7,17 +7,21 @@ from transformers import (
     GPT2LMHeadModel,
     Trainer,
     TrainingArguments,
-    DataCollatorWithPadding
+    DataCollatorWithPadding,
+    default_data_collator
 )
 from datasets import load_dataset
+import qtorch
 import torch
 import math
 import wandb
+from itertools import chain
 
-import block_linear
-import triton_functions
-from microxcaling.mx import finalize_mx_specs
-from microxcaling import mx
+
+# import block_linear
+# import triton_functions
+# from microxcaling.mx import finalize_mx_specs
+# from microxcaling import mx
 
 from low_precision_utils import utils
 
@@ -85,7 +89,7 @@ def collate_fn(batch, tokenizer, max_length):
 #     return {'input_ids': input_ids, 'labels': labels}
 
 def main():
-    os.environ["WANDB_PROJECT"] = "train-gpt2" 
+    os.environ["WANDB_PROJECT"] = "train-gpt2-variable-precision" 
     args = parse_args()
     if args.quantise_weight:
         block_linear.QUANTISE_WEIGHT = True
@@ -103,6 +107,39 @@ def main():
         y["label_ids"][y["label_ids"] == 50256] = -100
         return y
     dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
+
+    # def tokenize_function(examples):
+    #     result = tokenizer(examples['text'], padding="max_length", truncation=True, max_length=128)
+    #     # result['labels'] = result['input_ids'].copy()
+    #     # result['labels'] = [-100 if token == tokenizer.pad_token_id else token for token in result['labels']]
+    #     return result
+    # def group_texts(examples):
+    #     block_size = 128
+    #     # Concatenate all texts.
+    #     concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+    #     total_length = len(concatenated_examples[list(examples.keys())[0]])
+    #     # We drop the small remainder, and if the total_length < block_size  we exclude this batch and return an empty dict.
+    #     # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
+    #     total_length = (total_length // block_size) * block_size
+    #     # Split by chunks of max_len.
+    #     result = {}
+    #     for k, t in concatenated_examples.items():
+    #         result[k] = []
+    #         for i in range(0, total_length, block_size):
+    #             if i + block_size < len(t):
+    #                 result[k].append(t[i : i + block_size])
+    #             else:
+    #                 break
+    #     # result = {
+    #     #     k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+    #     #     for k, t in concatenated_examples.items()
+    #     # }
+    #     result["labels"] = result["input_ids"].copy()
+    #     return result
+    # dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
+    # dataset = dataset.map(group_texts, batched=True)
+
+    print(dataset._head())
     # dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.per_device_train_batch_size)
     # dataset = load_dataset('wikitext', 'wikitext-103-raw-v1', split='train')
 
@@ -155,7 +192,8 @@ def main():
             bwround_mode=args.bwrounding
         )
         print(quant_scheme)
-        model = utils.QuantWrapper(model, quant_scheme)
+        # model = utils.QuantWrapper(model, quant_scheme)
+        model = utils.replace_with_quantized(model, quant_scheme)
         
 
     # Define training arguments
@@ -181,9 +219,10 @@ def main():
         model=model,
         args=training_args,
         train_dataset=dataset,
-        data_collator=DataCollatorWithPadding(tokenizer=tokenizer,
-                                              padding='max_length',
-                                              max_length=128),
+        data_collator=default_data_collator,
+        # data_collator=DataCollatorWithPadding(tokenizer=tokenizer,
+        #                                       padding='max_length',
+        #                                       max_length=128),
         tokenizer=tokenizer,
     )
 

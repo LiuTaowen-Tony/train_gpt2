@@ -4,22 +4,22 @@
 # torchrun --nproc_per_node 4 train_gpt2_hf.py --size 30 --precision bf16
 
 # nearest 2
-python train_gpt2_hf.py --size 30 --precision finegrain \
+python train_gpt2_hf.py --size 30 --precision finegrain --opt_steps 20000 \
     --fnumber 2 --bnumber 2 --wnumber 2 --bwnumber 2 --bfnumber 2 \
     --frounding nearest --brounding nearest --wrounding nearest \
     --bwrounding nearest --bfrounding nearest \
     --same_input True --same_weight True
 
 # stochstaic 2
-python train_gpt2_hf.py --size 30 --precision finegrain \
+python train_gpt2_hf.py --size 30 --precision finegrain --opt_steps 20000 \
     --fnumber 2 --bnumber 2 --wnumber 2 --bwnumber 2 --bfnumber 2 \
     --frounding stochastic --brounding stochastic --wrounding stochastic \
     --bwrounding stochastic --bfrounding stochastic \
     --same_input False --same_weight False
 
 # fp8 2 3
-python train_gpt2_hf.py --size 30 --precision finegrain \
+torchrun --nproc_per_node 1 train_gpt2_hf.py --size 20 --precision finegrain --opt_steps 20000 \
     --fnumber 3 --bnumber 2 --wnumber 3 --bwnumber 2 --bfnumber 2 \
     --frounding nearest --brounding nearest --wrounding nearest \
     --bwrounding nearest --bfrounding nearest \
-    --same_input True --same_weight True
+    --same_input True --same_weight True --accumulate_grad_batches 16
