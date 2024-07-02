@@ -1,0 +1,6 @@
+[submodule "low_precision_utils"]
+	path = low_precision_utils
+	url = https://github.com/LiuTaowen-Tony/low_precision_utils.git
+[submodule "QPytorch"]
+	path = QPytorch
+	url = https://github.com/LiuTaowen-Tony/QPytorch

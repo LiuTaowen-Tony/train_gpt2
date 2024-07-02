@@ -13,8 +13,8 @@ from datasets import load_dataset
 import torch
 import math
 import wandb
-import sys
-sys.path.append('../..')
+# import sys
+# sys.path.append('../..')
 import block_linear
 import triton_functions
 from microxcaling.mx import finalize_mx_specs
@@ -35,8 +35,20 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument('--quantise_weight', action='store_true', help="Quantise weight for training")
     parser.add_argument('--weight_type', default="fp32")
-    # parser.add_argument('--activation_grad_type', default="fp32")
+    parser.add_argument('--fnumber', type=int, default=None, help="Number of bits for the fraction part")
+    parser.add_argument('--fbnumber', type=int, default=None, help="Number of bits for the fraction part")
+    parser.add_argument('--bnumber', type=int, default=None, help="Number of bits for the fraction part")
+    parser.add_argument('--wnumber', type=int, default=None, help="Number of bits for the fraction part")
+    parser.add_argument('--wbnumber', type=int, default=None, help="Number of bits for the fraction part")
+    parser.add_argument('--frounding', type=str, default=None)
+    parser.add_argument('--brounding', type=str, default=None)
+    parser.add_argument('--fbrounding', type=str, default=None)
+    parser.add_argument('--wrounding', type=str, default=None)
+    parser.add_argument('--wbrounding', type=str, default=None)
+    parser.add_argument('--same_input', type=lambda x: (str(x).lower() == 'true'), default=False)
+    parser.add_argument('--same_weight', type=lambda x: (str(x).lower() == 'true'), default=False)
     parser.add_argument('--size', type=float, default=1.0)
+
     args = parser.parse_args()
     args.per_device_train_batch_size = args.total_batch_size // args.accumulate_grad_batches // torch.cuda.device_count()
     return args
@@ -122,8 +134,12 @@ def main():
         mx_specs = finalize_mx_specs(mx_specs)
         print(mx_specs)
         model = replace_mx_linear(model, mx_specs)
-    if args.precision == "block_int8":
+    elif args.precision == "block_int8":
         model = block_linear.replace_linear_with_blockwise_int8(model)
+    elif args.precision == "finegrain":
+
+
+    
 
     # Define training arguments
     training_args = TrainingArguments(
