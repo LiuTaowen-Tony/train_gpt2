@@ -13,12 +13,14 @@ from datasets import load_dataset
 import torch
 import math
 import wandb
-# import sys
-# sys.path.append('../..')
+
 import block_linear
 import triton_functions
 from microxcaling.mx import finalize_mx_specs
 from microxcaling import mx
+
+from low_precision_utils import utils
+
 import os
 
 # Argument parser
@@ -36,15 +38,15 @@ def parse_args():
     parser.add_argument('--quantise_weight', action='store_true', help="Quantise weight for training")
     parser.add_argument('--weight_type', default="fp32")
     parser.add_argument('--fnumber', type=int, default=None, help="Number of bits for the fraction part")
-    parser.add_argument('--fbnumber', type=int, default=None, help="Number of bits for the fraction part")
+    parser.add_argument('--bfnumber', type=int, default=None, help="Number of bits for the fraction part")
     parser.add_argument('--bnumber', type=int, default=None, help="Number of bits for the fraction part")
     parser.add_argument('--wnumber', type=int, default=None, help="Number of bits for the fraction part")
-    parser.add_argument('--wbnumber', type=int, default=None, help="Number of bits for the fraction part")
+    parser.add_argument('--bwnumber', type=int, default=None, help="Number of bits for the fraction part")
     parser.add_argument('--frounding', type=str, default=None)
     parser.add_argument('--brounding', type=str, default=None)
-    parser.add_argument('--fbrounding', type=str, default=None)
+    parser.add_argument('--bfrounding', type=str, default=None)
     parser.add_argument('--wrounding', type=str, default=None)
-    parser.add_argument('--wbrounding', type=str, default=None)
+    parser.add_argument('--bwrounding', type=str, default=None)
     parser.add_argument('--same_input', type=lambda x: (str(x).lower() == 'true'), default=False)
     parser.add_argument('--same_weight', type=lambda x: (str(x).lower() == 'true'), default=False)
     parser.add_argument('--size', type=float, default=1.0)
@@ -137,9 +139,24 @@ def main():
     elif args.precision == "block_int8":
         model = block_linear.replace_linear_with_blockwise_int8(model)
     elif args.precision == "finegrain":
-
-
-    
+        build_number = lambda x : qtorch.FloatingPoint(8, x)
+        quant_scheme = utils.QuantScheme(
+            fnumber=build_number(args.fnumber),
+            bnumber=build_number(args.bnumber),
+            wnumber=build_number(args.wnumber),
+            fround_mode=args.frounding,
+            bround_mode=args.brounding,
+            wround_mode=args.wrounding,
+            same_input=args.same_input,
+            same_weight=args.same_weight,
+            bfnumber=build_number(args.bfnumber),
+            bwnumber=build_number(args.bwnumber),
+            bfround_mode=args.bfrounding,
+            bwround_mode=args.bwrounding
+        )
+        print(quant_scheme)
+        model = utils.QuantWrapper(model, quant_scheme)
+        
 
     # Define training arguments
     training_args = TrainingArguments(
