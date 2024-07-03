@@ -70,6 +70,16 @@ def replace_mx_linear(model, mx_specs):
                 weight = child.weight
                 setattr(module, name, mx.Linear(child.in_features, child.out_features, child.bias, mx_specs))
                 getattr(module, name).weight = weight
+            elif isinstance(child, torch.nn.Conv1d):
+                print(f"replacing {name} with microxcaling")
+                weight = child.weight
+                setattr(module, name, mx.Conv1d(child.in_channels, child.out_channels, child.kernel_size, 
+                                                stride=child.stride,
+                                                padding=child.padding,
+                                                dilation=child.dilation,
+                                                bias=child.bias is not None, 
+                                                mx_specs=mx_specs))
+                getattr(module, name).weight = weight
             else:
                 recursive_replace_module(child)
     recursive_replace_module(model)
