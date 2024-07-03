@@ -6,3 +6,8 @@ datasets
 accelerate
 wandb
 pandas
+sentencepiece
+sacremoses
+sacrebleu
+torchsummary
+modelsummary

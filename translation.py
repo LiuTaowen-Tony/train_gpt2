@@ -1,21 +1,21 @@
+import numpy as np
 import random
 import argparse
 import torch.utils
 from transformers import (
-    GPT2Tokenizer,
-    GPT2Config,
-    GPT2LMHeadModel,
+    MarianTokenizer, MarianMTModel, MarianConfig,
     Trainer,
     TrainingArguments,
-    DataCollatorWithPadding,
+    DataCollatorForSeq2Seq,
     default_data_collator
 )
-from datasets import load_dataset
+from datasets import load_dataset, load_metric
 import qtorch
 import torch
 import math
 import wandb
 from itertools import chain
+import torchsummary
 
 
 # import block_linear
@@ -30,13 +30,13 @@ import os
 # Argument parser
 def parse_args():
     parser = argparse.ArgumentParser(description="Train GPT-2 model from scratch.")
-    parser.add_argument('--total_batch_size', type=int, default=128, help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
+    parser.add_argument('--total_batch_size', type=int, default=80, help='Batch size for training')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of epochs to train')
     parser.add_argument('--accumulate_grad_batches', type=int, default=1, help='Gradient accumulation steps')
     parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate for the optimizer')
     parser.add_argument('--precision', type=str, default='bf16', help='Precision for training (16 or bf16)')
     parser.add_argument('--warmup_steps', type=int, default=1000, help='Number of warmup steps')
-    parser.add_argument('--opt_steps', type=int, default=10000, help='Number of warmup steps')
+    parser.add_argument('--opt_steps', type=int, default=100_000, help='Number of warmup steps')
     parser.add_argument('--gradient_clip_val', type=float, default=1.0, help="Value for gradient clipping")
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument('--quantise_weight', action='store_true', help="Quantise weight for training")
@@ -75,46 +75,100 @@ def replace_mx_linear(model, mx_specs):
     recursive_replace_module(model)
     return model
 
-def collate_fn(batch, tokenizer, max_length):
-    print(batch)
-    inputs = tokenizer(batch, return_tensors='pt', padding='max_length', truncation=True,  max_length=max_length)
-    inputs['labels'] = inputs['input_ids'].clone()
-    
-    return inputs
-
 def main():
-    os.environ["WANDB_PROJECT"] = "train-gpt2-variable-precision" 
+    os.environ["WANDB_PROJECT"] = "wmt-14-en-de-precision" 
     args = parse_args()
     if args.quantise_weight:
         block_linear.QUANTISE_WEIGHT = True
 
     # Load tokenizer
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer
+    tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-de")
+    # tokenizer.pad_token = tokenizer.eos_token
 
     # Load C4 dataset
-    dataset = load_dataset(path='allenai/c4', name='en', split='train', streaming=True, trust_remote_code=True)
-    def tokenize_function(examples):
-        y = tokenizer(examples['text'], return_tensors="pt", padding="max_length", truncation=True, max_length=128)
-        y["label_ids"] = y["input_ids"].clone()
-        y["label_ids"][y["label_ids"] == 50256] = -100
-        return y
-    dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
+    # dataset = load_dataset(path='allenai/c4', name='en', split='train', streaming=True, trust_remote_code=True)
+    dataset = load_dataset('wmt14', 'de-en')
+
+    def preprocess_function(examples):
+        source_lang = 'en'
+        target_lang = 'de'
+        inputs = [example[source_lang] for example in examples["translation"]]
+        targets = [example[target_lang] for example in examples["translation"]]
+        model_inputs = tokenizer(inputs, max_length=128, truncation=True, padding="max_length")
+        with tokenizer.as_target_tokenizer():
+            labels = tokenizer(targets, max_length=128, truncation=True, padding="max_length")
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+    tokenized_datasets = dataset.map(preprocess_function, batched=True)
+    train_dataset = tokenized_datasets["train"]
+    eval_dataset = tokenized_datasets["validation"]
+
+    metric = load_metric("sacrebleu", trust_remote_code=True)
+
+    def postprocess_text(preds, labels):
+        preds = [pred.strip() for pred in preds]
+        labels = [[label.strip()] for label in labels]
+        return preds, labels
+
+    def compute_metrics(eval_preds):
+        preds, labels = eval_preds
+        if isinstance(preds, tuple):
+            preds = preds[0]
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+
+        result = metric.compute(predictions=decoded_preds, references=decoded_labels)
+        result = {"bleu": result["score"]}
+
+        prediction_lens = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in preds]
+        result["gen_len"] = np.mean(prediction_lens)
+        result = {k: round(v, 4) for k, v in result.items()}
+        return result
+
+    # def tokenize_function(examples):
+    #     y = tokenizer(examples['text'], return_tensors="pt", padding="max_length", truncation=True, max_length=128)
+    #     y["label_ids"] = y["input_ids"].clone()
+    #     y["label_ids"][y["label_ids"] == 50256] = -100
+    #     return y
+    # dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
 
 
-    print(dataset._head())
-
-
-    config = GPT2Config(
-        vocab_size=tokenizer.vocab_size,
-        n_positions=128,
-        n_ctx=128,
-        n_embd=int(256 * math.sqrt(args.size)) // 4 * 4,
-        n_layer=int(6 * math.sqrt(args.size)),
-        n_head=4,
+    # print(dataset._head())
+    config = MarianConfig(
+        vocab_size=tokenizer.vocab_size,  # Use the vocab size from the tokenizer
+        max_position_embeddings=512,
+        encoder_layers=6,
+        encoder_ffn_dim=2048,
+        encoder_attention_heads=8,
+        decoder_layers=6,
+        decoder_ffn_dim=2048,
+        decoder_attention_heads=8,
+        d_model=512,
+        dropout=0.1,
+        attention_dropout=0.1,
+        activation_dropout=0.1,
+        init_std=0.02,
+        classifier_dropout=0.1,
+        use_cache=True,
+        num_beams=4,
+        length_penalty=2.0,
+        early_stopping=True,
     )
-    model = GPT2LMHeadModel(config)
+
+    # Initialize the MarianMT model with the defined configuration
+    model = MarianMTModel(config)
+    # fake_input = torch.randint(0, 1000, (128, 128))
+    # print(torchsummary.summary(model, (1, 128, 128), dtype=torch.long, device="cpu"))
+    print(model)
+    pytorch_total_params = sum(p.numel() for p in model.parameters())
+    print(pytorch_total_params)
+
+
+
 
     # Precision handling
     if args.weight_type == "bf16":
@@ -160,7 +214,7 @@ def main():
 
     # Define training arguments
     training_args = TrainingArguments(
-        output_dir='/vol/bitbucket/tl2020/results',
+        output_dir='/vol/bitbucket/tl2020/translation-results',
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.accumulate_grad_batches,
@@ -173,30 +227,25 @@ def main():
         bf16=args.precision == 'bf16',
         dataloader_drop_last=True,
         dataloader_pin_memory=True,
-        max_steps=args.opt_steps * args.accumulate_grad_batches,
+        eval_steps=1000,
+        eval_strategy="steps",
+        # max_steps=args.opt_steps * args.accumulate_grad_batches,
     )
 
     # Initialize Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
-        data_collator=default_data_collator,
-        # data_collator=DataCollatorWithPadding(tokenizer=tokenizer,
-        #                                       padding='max_length',
-        #                                       max_length=128),
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator = DataCollatorForSeq2Seq(tokenizer, model=model),
         tokenizer=tokenizer,
+        compute_metrics=compute_metrics,
     )
 
     # Train the model
     trainer.train()
-    for i in model.parameters():
-        print(i)
-        print(i.dtype)
-        break
-
-    # Save the model
-    model.save_pretrained("./small-gpt2-c4")
+    # model.save_pretrained("./small-gpt2-c4")
 
 if __name__ == "__main__":
     main()
