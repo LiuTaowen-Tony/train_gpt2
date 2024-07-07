@@ -214,7 +214,7 @@ def main():
 
     # Define training arguments
     training_args = TrainingArguments(
-        output_dir='/vol/bitbucket/tl2020/translation-results',
+        output_dir='translation-results',
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.accumulate_grad_batches,
