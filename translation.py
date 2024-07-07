@@ -75,6 +75,14 @@ def replace_mx_linear(model, mx_specs):
     recursive_replace_module(model)
     return model
 
+def preprocess_logits_for_metrics(logits, labels):
+    """
+    Original Trainer may have a memory leak. 
+    This is a workaround to avoid storing too many tensors that are not needed.
+    """
+    pred_ids = torch.argmax(logits[0], dim=-1)
+    return pred_ids, labels
+
 def main():
     os.environ["WANDB_PROJECT"] = "wmt-14-en-de-precision" 
     args = parse_args()
@@ -112,6 +120,7 @@ def main():
 
     def compute_metrics(eval_preds):
         preds, labels = eval_preds
+        print(preds, labels)
         if isinstance(preds, tuple):
             preds = preds[0]
         decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
@@ -218,6 +227,7 @@ def main():
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.accumulate_grad_batches,
+        per_device_eval_batch_size=64,
         warmup_steps=args.warmup_steps * args.accumulate_grad_batches,
         learning_rate=args.learning_rate,
         logging_dir='./logs',
@@ -241,6 +251,7 @@ def main():
         data_collator = DataCollatorForSeq2Seq(tokenizer, model=model),
         tokenizer=tokenizer,
         compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 
     # Train the model
