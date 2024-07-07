@@ -90,6 +90,7 @@ def main():
         block_linear.QUANTISE_WEIGHT = True
 
     # Load tokenizer
+    wandb.init()
     tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-de")
     # tokenizer.pad_token = tokenizer.eos_token
 
@@ -129,6 +130,11 @@ def main():
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
         decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+
+        columns = ["preds", "lables"]
+        data = list(zip(decoded_preds[:3], decoded_labels[:3]))
+        table = wandb.Table(data=data, columns=columns)
+        wandb.log({"translate_examples" : table})
 
         result = metric.compute(predictions=decoded_preds, references=decoded_labels)
         result = {"bleu": result["score"]}
@@ -231,7 +237,7 @@ def main():
         warmup_steps=args.warmup_steps * args.accumulate_grad_batches,
         learning_rate=args.learning_rate,
         logging_dir='./logs',
-        logging_steps=10,
+        logging_steps=1000,
         report_to="wandb",
         gradient_checkpointing=True,
         bf16=args.precision == 'bf16',
@@ -239,6 +245,7 @@ def main():
         dataloader_pin_memory=True,
         eval_steps=1000,
         eval_strategy="steps",
+        save_strategy="no",
         # max_steps=args.opt_steps * args.accumulate_grad_batches,
     )
 
