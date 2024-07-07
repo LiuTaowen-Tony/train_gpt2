@@ -1,6 +1,5 @@
 torch
 ninja
--e QPytorch
 transformers
 datasets
 accelerate
